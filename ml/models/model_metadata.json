@@ -1,0 +1,35 @@
+{
+  "model_name": "random_forest",
+  "trained_at": "20260420_112712",
+  "features": [
+    "temperature_c",
+    "humidity_pct",
+    "pressure_hpa",
+    "wind_speed_kmh",
+    "wind_direction_deg",
+    "cloud_cover_pct",
+    "dew_point_c",
+    "visibility_km",
+    "uv_index",
+    "temp_change_3h",
+    "pressure_change_3h",
+    "month",
+    "humidity_pressure_ratio",
+    "dew_spread",
+    "is_monsoon_month",
+    "wind_humidity_index"
+  ],
+  "metrics": {
+    "model": "Random Forest",
+    "accuracy": 82.5,
+    "roc_auc": 0.9021,
+    "precision": 0.8042,
+    "recall": 0.7506,
+    "f1_score": 0.7765
+  },
+  "model_path": "models/random_forest_model.joblib",
+  "scaler_path": "models/scaler.joblib",
+  "version": "1.0.0",
+  "description": "Rain Forecasting Binary Classifier",
+  "feature_count": 16
+}

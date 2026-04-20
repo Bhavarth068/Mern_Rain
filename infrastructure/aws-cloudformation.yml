@@ -1,0 +1,252 @@
+# ============================================================
+# Rain Forecasting System — AWS CloudFormation Template
+# Deploys: EC2 (Backend), S3 (Frontend), Security Groups,
+#          IAM roles, and documents MongoDB Atlas connection.
+# ============================================================
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Rain Forecasting System — Infrastructure as Code.
+  Provisions EC2 for Node.js + Flask backend and S3 for React frontend.
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair for SSH access
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium]
+    Description: EC2 instance type
+
+  MongoDBUri:
+    Type: String
+    NoEcho: true
+    Description: MongoDB Atlas connection string
+
+  OpenWeatherMapKey:
+    Type: String
+    NoEcho: true
+    Description: OpenWeatherMap API key
+
+  JWTSecret:
+    Type: String
+    NoEcho: true
+    Description: JWT signing secret
+
+  FrontendBucketName:
+    Type: String
+    Default: rain-forecasting-frontend
+    Description: S3 bucket name for React frontend
+
+Resources:
+  # ── VPC & Networking ────────────────────────────────────────
+  RainForecastVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: rain-forecast-vpc }]
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RainForecastVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref RainForecastVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref RainForecastVPC
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ── Security Group ──────────────────────────────────────────
+  BackendSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Rain Forecasting Backend Security Group
+      VpcId: !Ref RainForecastVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0   # Restrict to your IP in production
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: 0.0.0.0/0   # Node.js backend
+        - IpProtocol: tcp
+          FromPort: 5001
+          ToPort: 5001
+          CidrIp: 10.0.0.0/16 # Flask ML service (internal only)
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  # ── IAM Role for EC2 ────────────────────────────────────────
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref EC2Role]
+
+  # ── EC2 Instance ─────────────────────────────────────────────
+  BackendInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: ami-0f58b397bc5c1f2e8   # Amazon Linux 2023 (ap-south-1)
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds: [!Ref BackendSecurityGroup]
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          yum update -y
+
+          # Install Node.js 20
+          curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+          yum install -y nodejs git
+
+          # Install Python 3.11 + pip
+          yum install -y python3.11 python3.11-pip
+
+          # Install PM2 globally
+          npm install -g pm2
+
+          # Clone or copy application (update with your repo URL)
+          cd /home/ec2-user
+          git clone https://github.com/YOUR_USERNAME/rain-forecasting-system.git app
+          cd app
+
+          # Setup backend
+          cd server
+          cat > .env << 'ENVEOF'
+          PORT=5000
+          NODE_ENV=production
+          MONGODB_URI=${MongoDBUri}
+          OPENWEATHERMAP_API_KEY=${OpenWeatherMapKey}
+          JWT_SECRET=${JWTSecret}
+          JWT_EXPIRES_IN=7d
+          ML_SERVICE_URL=http://localhost:5001
+          FRONTEND_URL=https://${FrontendBucketName}.s3-website.ap-south-1.amazonaws.com
+          ENVEOF
+          npm install --production
+          pm2 start server.js --name "rain-backend" --env production
+
+          # Setup ML service
+          cd ../ml
+          python3.11 -m pip install -r requirements.txt
+          python3.11 train_model.py
+          pm2 start prediction_service.py --name "rain-ml" --interpreter python3.11
+
+          # Save PM2 config
+          pm2 save
+          pm2 startup systemd -u ec2-user --hp /home/ec2-user
+
+      Tags:
+        - Key: Name
+          Value: rain-forecasting-backend
+        - Key: Project
+          Value: rain-forecasting-system
+
+  # ── Elastic IP ───────────────────────────────────────────────
+  BackendEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref BackendInstance
+
+  # ── S3 Bucket — React Frontend ───────────────────────────────
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref FrontendBucketName
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET]
+            AllowedOrigins: ['*']
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub 'arn:aws:s3:::${FrontendBucketName}/*'
+
+Outputs:
+  BackendPublicIP:
+    Description: Backend EC2 Public IP
+    Value: !Ref BackendEIP
+
+  BackendAPIURL:
+    Description: Backend API Base URL
+    Value: !Sub 'http://${BackendEIP}:5000/api'
+
+  FrontendURL:
+    Description: React Frontend S3 Website URL
+    Value: !Sub 'http://${FrontendBucketName}.s3-website.${AWS::Region}.amazonaws.com'
+
+  SSHCommand:
+    Description: SSH into backend
+    Value: !Sub 'ssh -i ${KeyPairName}.pem ec2-user@${BackendEIP}'
